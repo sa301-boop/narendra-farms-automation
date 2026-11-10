@@ -1,27 +1,117 @@
 name: Playwright Tests
+
 on:
   push:
-    branches: [ main, master ]
+    branches: [main]
   pull_request:
-    branches: [ main, master ]
+    branches: [main]
+
 jobs:
   test:
     timeout-minutes: 60
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: narendra_farms_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d narendra_farms_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/narendra_farms_test?schema=public
+      JWT_SECRET: github-actions-test-secret
+      PORT: 5001
+    FRONTEND_URL: http://localhost:5173
+
     steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-node@v4
-      with:
-        node-version: lts/*
-    - name: Install dependencies
-      run: npm ci
-    - name: Install Playwright Browsers
-      run: npx playwright install --with-deps
-    - name: Run Playwright tests
-      run: npx playwright test
-    - uses: actions/upload-artifact@v4
-      if: ${{ !cancelled() }}
-      with:
-        name: playwright-report
-        path: playwright-report/
-        retention-days: 30
+      - name: Checkout Automation Repository
+        uses: actions/checkout@v4
+
+      - name: Checkout Application Repository
+        uses: actions/checkout@v4
+        with:
+          repository: sa301-boop/narendra-farms
+          path: narendra-farms
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Automation Dependencies
+        run: npm ci
+
+      - name: Install Application Dependencies
+        working-directory: narendra-farms
+        run: npm ci
+
+      - name: Install Backend Dependencies
+        working-directory: narendra-farms/server
+        run: npm ci
+
+      - name: Install Playwright Browsers
+        run: npx playwright install --with-deps
+
+      - name: Generate Prisma Client
+        working-directory: narendra-farms/server
+        run: npx prisma generate
+
+      - name: Run Database Migrations
+        working-directory: narendra-farms/server
+        run: npx prisma migrate deploy
+
+      - name: Seed Database
+        working-directory: narendra-farms/server
+        run: npx tsx src/seed.ts
+
+      - name: Build Application
+        working-directory: narendra-farms
+        run: npm run build
+
+      - name: Start Backend
+        working-directory: narendra-farms/server
+        run: |
+          nohup npm run dev > /tmp/narendra-api.log 2>&1 &
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:5001/api/health; then
+              echo "Backend is ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          cat /tmp/narendra-api.log
+          exit 1
+
+      - name: Start Frontend
+        working-directory: narendra-farms
+        run: |
+          nohup npm run dev -- --host 0.0.0.0 > /tmp/narendra-frontend.log 2>&1 &
+          for i in {1..30}; do
+            if curl -fsS http://localhost:5173; then
+              echo "Frontend is ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          cat /tmp/narendra-frontend.log
+          exit 1
+
+      - name: Run Playwright Tests
+        run: npx playwright test
+
+      - name: Upload Playwright Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 30
